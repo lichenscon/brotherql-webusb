@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brother Label Printer WebUSB</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 20px;
+        background-color: #f4f4f9;
+        color: #333;
+      }
+      h1 {
+        color: #00509e;
+      }
+      .container {
+        max-width: 600px;
+        text-align: center;
+        padding: 20px;
+        background: #fff;
+        border-radius: 8px;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      }
+      .description {
+        font-size: 16px;
+        margin-bottom: 20px;
+        color: #666;
+      }
+      #imageUpload {
+        margin: 20px 0;
+      }
+      button {
+        padding: 10px 20px;
+        background-color: #00509e;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 16px;
+      }
+      button:hover {
+        background-color: #003f7f;
+      }
+      #fileName {
+        margin-top: 10px;
+        font-size: 14px;
+        color: #555;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Brother Label Printer WebUSB</h1>
+      <p class="description">
+        This little tool is a work-in-progress that will eventually allow you to
+        print images on a Brother QL-series label printer directly from the
+        browser, no drivers or installation needed! Just plug your printer's USB
+        cable into your computer, select an image, and click the "Print Label"
+        button to get started.
+      </p>
+
+      <h3>How It Works</h3>
+      <p class="description">
+        This page uses the
+        <a
+          href="https://developer.mozilla.org/en-US/docs/Web/API/WebUSB_API"
+          target="_blank"
+          rel="noopener noreferrer"
+          >WebUSB API</a
+        >
+        to communicate directly to your Brother label printer over USB. It
+        manually converts the selected image to monochrome and generates the
+        necessary raster data to print it on the label printer. The printer
+        commands are sent as a series of bytes to the printer using the WebUSB
+        API. Check it out on
+        <a
+          href="https://github.com/tylercrumpton/brotherql-webusb"
+          target="_blank"
+          rel="noopener noreferrer"
+          >GitHub</a
+        >!
+      </p>
+
+      <p>
+        <strong>Note:</strong> This is a work-in-progress protoype and is
+        hardcoded to work with a Brother QL-700 printer and a 62mm x 29mm
+        die-cut label roll. Most of the guts are ready to be expanded to other
+        printers, labels, and features, but I've not gotten there yet.
+      </p>
+
+      <p>
+        This work is heavily inspired by the
+        <a
+          href="https://github.com/pklaus/brother_ql"
+          target="_blank"
+          rel="noopener noreferrer"
+          >brother_ql</a
+        >
+        Python library by Philipp Klaus that uses PyUSB to send commands to
+        Brother QL-series label printers.
+      </p>
+
+      <!-- File upload and interaction buttons -->
+      <input type="file" id="imageUpload" accept="image/*" />
+      <button id="print">Print Label</button>
+
+      <p>♥ tyler crumpton</p>
+    </div>
+
+    <script>
+      const connectButton = document.getElementById("connect");
+      const printButton = document.getElementById("print");
+      const imageUpload = document.getElementById("imageUpload");
+
+      let device;
+      let endpointIn;
+      let endpointOut;
+      let selectedImage;
+
+      async function processImage(imageFile) {
+        // TOOD: use some library instead of manual processing
+        const img = new Image();
+        img.src = URL.createObjectURL(imageFile);
+
+        await img.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+
+        // Flip the image horizontally
+        ctx.save(); // Save the current context state
+        ctx.scale(-1, 1); // Flip horizontally
+        ctx.drawImage(img, -canvas.width, 0, canvas.width, canvas.height); // NB: adjusted drawing position for flipped image
+        ctx.restore(); // Restore the context to its original state
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const pixels = imageData.data;
+        const monochromeData = [];
+
+        for (let i = 0; i < pixels.length; i += 4) {
+          const grayscale = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+          monochromeData.push(grayscale > 128 ? 0 : 1); // Convert to binary
+        }
+
+        return {
+          width: canvas.width,
+          height: canvas.height,
+          data: monochromeData,
+        };
+      }
+
+      function generateRasterData(image) {
+        const margin = getDevicePixelWidth() - image.width;
+        const { width, height, data } = image;
+
+        const rows = [];
+        for (let y = 0; y < height; y++) {
+          const row = [];
+          for (let x = 0; x < margin / 2; x++) {
+            row.push(0);
+          }
+          for (let x = 0; x < width; x++) {
+            row.push(data[y * width + x]);
+          }
+          for (let x = 0; x < margin / 2; x++) {
+            row.push(0);
+          }
+          rows.push(row);
+        }
+        return rows;
+      }
+
+      function genInvalidate() {
+        return new Uint8Array(200); // Clear command buffer with zeros
+      }
+
+      function genInitialize() {
+        return new Uint8Array([0x1b, 0x40]); // ESC @
+      }
+
+      function genStatusInformation() {
+        return new Uint8Array([0x1b, 0x69, 0x53]); // ESC i S
+      }
+
+      function genSwitchMode() {
+        return new Uint8Array([0x1b, 0x69, 0x61, 0x01]); // ESC i a
+      }
+
+      function genMediaAndQuality() {
+        // TODO handle different media types and quality
+        mtype = 0x0b; // 0x0b: die-cut, 0x0a: endless, 0x00: ptouch endless
+        mwidth = 62; // 62mm
+        mlength = 29; // 29mm
+        pquality = 0x01; // 0x00: standard, 0x01: high
+        rnum = 271; // number of rows of pixel data
+
+        const flags =
+          0x80 |
+          ((mtype !== null) << 1) |
+          ((mwidth !== null) << 2) |
+          ((mlength !== null) << 3) |
+          (pquality << 6);
+
+        return new Uint8Array([
+          0x1b,
+          0x69,
+          0x7a,
+          flags,
+          mtype,
+          mwidth,
+          mlength,
+          rnum & 0xff,
+          (rnum >> 8) & 0xff,
+          (rnum >> 16) & 0xff,
+          (rnum >> 24) & 0xff,
+          0x00,
+          0x00,
+        ]);
+      }
+
+      function genAutocut(autocut = false) {
+        const autocutByte = autocut ? 0x40 : 0x00;
+        return new Uint8Array([0x1b, 0x69, 0x4d, autocutByte]); // ESC i M
+      }
+
+      function genCutEvery(n = 1) {
+        return new Uint8Array([0x1b, 0x69, 0x41, n & 0xff]); // ESC i A
+      }
+
+      function genExpandedMode() {
+        const flags = 0x08; // TODO: set flags based on options
+        return new Uint8Array([0x1b, 0x69, 0x4b, flags]); // ESC i K
+      }
+
+      function genMargins(dots = 0x0023) {
+        return new Uint8Array([
+          0x1b,
+          0x69,
+          0x64,
+          dots & 0xff,
+          (dots >> 8) & 0xff,
+        ]); // ESC i d
+      }
+
+      function genCompression(compression = True) {
+        //TODO
+      }
+
+      function getDevicePixelWidth() {
+        return 90 * 8; // TODO: get from printer model
+      }
+
+      function genRasterData(image) {
+        // TODO add compression, multicolor, PT- models,
+        const rows = generateRasterData(image);
+        console.log("Rows:", rows.length);
+        console.log("Row length:", rows[0].length);
+        let rasterData = new Uint8Array();
+        for (const row of rows) {
+          const packedRow = new Uint8Array(row.length / 8);
+          for (let i = 0; i < row.length; i += 8) {
+            let byte = 0;
+            for (let bit = 0; bit < 8; bit++) {
+              byte |= row[i + bit] << (7 - bit);
+            }
+            packedRow[i / 8] = byte;
+          }
+
+          const rowHeader = new Uint8Array([0x67, 0x00, packedRow.length]);
+          rasterData = new Uint8Array([
+            ...rasterData,
+            ...rowHeader,
+            ...packedRow,
+          ]);
+        }
+        return rasterData;
+      }
+
+      function genPrint(isLastPage = true) {
+        const byte = isLastPage ? 0x1a : 0x0c; // EOF or FF
+        return new Uint8Array([byte]);
+      }
+
+      async function connectToPrinter() {
+        try {
+          // Request USB Device from user
+          device = await navigator.usb.requestDevice({
+            filters: [{ vendorId: 0x04f9 }],
+          });
+          await device.open();
+          if (device.configuration === null) {
+            await device.selectConfiguration(1);
+          }
+          await device.claimInterface(0);
+
+          // Find the Printer Interface and Endpoints
+          const interfaces = device.configuration.interfaces;
+          interfaces.forEach((element) => {
+            element.alternates.forEach((alternate) => {
+              if (alternate.interfaceClass === 7) {
+                alternate.endpoints.forEach((endpoint) => {
+                  if (endpoint.direction === "in") {
+                    endpointIn = endpoint.endpointNumber;
+                  }
+                  if (endpoint.direction === "out") {
+                    endpointOut = endpoint.endpointNumber;
+                  }
+                });
+              }
+            });
+          });
+
+          console.log("Device connected:", device);
+        } catch (error) {
+          console.error("Error connecting to device:", error);
+        }
+      }
+
+      imageUpload.addEventListener("change", (event) => {
+        selectedImage = event.target.files[0];
+        document.getElementById("fileName").innerText = selectedImage.name;
+      });
+
+      printButton.addEventListener("click", async () => {
+        await connectToPrinter();
+
+        if (!selectedImage) {
+          console.error("No image selected");
+          return;
+        }
+        if (!device) {
+          console.error("Device not connected");
+          return;
+        }
+        try {
+          // Process Image
+          const processedImage = await processImage(selectedImage);
+
+          // Generate print data
+          // TODO handle multiple images, switch modes, etc
+          const commandBuffer = new Uint8Array([
+            ...genInvalidate(),
+            ...genInitialize(),
+            ...genStatusInformation(),
+            ...genMediaAndQuality(),
+            ...genAutocut(true),
+            ...genCutEvery(),
+            ...genExpandedMode(),
+            ...genMargins(0),
+            ...genRasterData(processedImage),
+            ...genPrint(true),
+          ]);
+
+          // Send print data
+          await device.transferOut(endpointOut, commandBuffer);
+        } catch (error) {
+          console.error("Error printing label:", error);
+        }
+      });
+    </script>
+  </body>
+</html>
