@@ -296,13 +296,14 @@
           if (device.configuration === null) {
             await device.selectConfiguration(1);
           }
-          await device.claimInterface(0);
 
           // Find the Printer Interface and Endpoints
           const interfaces = device.configuration.interfaces;
+          let printerInterfaceIndex = null;
           interfaces.forEach((element) => {
             element.alternates.forEach((alternate) => {
               if (alternate.interfaceClass === 7) {
+                printerInterfaceIndex = element.interfaceNumber;
                 alternate.endpoints.forEach((endpoint) => {
                   if (endpoint.direction === "in") {
                     endpointIn = endpoint.endpointNumber;
@@ -314,6 +315,11 @@
               }
             });
           });
+          if (printerInterfaceIndex === null) {
+            throw new Error("Printer interface not found");
+          } else {
+            await device.claimInterface(printerInterfaceIndex);
+          }
 
           console.log("Device connected:", device);
         } catch (error) {
